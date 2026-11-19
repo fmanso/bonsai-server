@@ -1,0 +1,11 @@
+venv/
+.venv/
+hf/
+models/
+tokenizer/
+install.log
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+.env
