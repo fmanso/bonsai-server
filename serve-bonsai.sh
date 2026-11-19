@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# serve-bonsai.sh — descarga Ternary Bonsai 2 27B (GGUF) y lo sirve con
-# llama.cpp (llama-server) como API compatible con OpenAI.
+# serve-bonsai.sh — descarga Bonsai 2 27B o GLM-4.7-Flash (GGUF) y los sirve
+# con llama.cpp (llama-server) como API compatible con OpenAI.
 #
 #   bash serve-bonsai.sh                 # detecta hardware, descarga y sirve
 #   bash serve-bonsai.sh --help
@@ -14,14 +14,16 @@
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 # --- Configuración por defecto (todo se puede sobrescribir por entorno) -----
 LLAMA_REPO="${LLAMA_REPO:-PrismML-Eng/llama.cpp}"
 LLAMA_RELEASE="${LLAMA_RELEASE:-prism-b10828-a153697}"
-MODEL_REPO="${MODEL_REPO:-prism-ml/Ternary-Bonsai-2-27B-gguf}"
-SERVED_NAME="${SERVED_NAME:-bonsai-2-27b}"
-PACKING="${PACKING:-pq2}"
+MODEL="${MODEL:-bonsai}"          # bonsai | glm47
+MODEL_REPO="${MODEL_REPO:-}"
+SERVED_NAME="${SERVED_NAME:-}"
+PACKING="${PACKING:-pq2}"         # solo Bonsai: pq2 | ptq1 | q2
+PACKING_EXPLICIT=0
 
 BASE_DIR="${BASE_DIR:-$HOME/.local/share/bonsai}"
 HOST="${HOST:-127.0.0.1}"
@@ -122,7 +124,7 @@ ensure_deps() {
 
 usage() {
   cat <<EOF
-serve-bonsai.sh v${VERSION} — sirve Ternary Bonsai 2 con llama.cpp
+serve-bonsai.sh v${VERSION} — sirve Bonsai 2 o GLM-4.7-Flash con llama.cpp
 
 USO
   bash serve-bonsai.sh [opciones] [-- <flags extra para llama-server>]
@@ -131,7 +133,8 @@ OPCIONES
   -y, --yes              No preguntar nada
   -p, --port N           Puerto HTTP (por defecto 8000)
   -l, --max-model-len N  Contexto máximo en tokens (por defecto: auto según VRAM/RAM)
-  -q, --packing P        pq2 (defecto, 7.21 GB) | ptq1 (5.95 GB) | q2 (7.63 GB)
+      --model M          bonsai (defecto) | glm47 (GLM-4.7-Flash 30B-A3B; ≥22 GB VRAM)
+  -q, --packing P        Solo Bonsai: pq2 (defecto, 7.21 GB) | ptq1 (5.95 GB) | q2 (7.63 GB)
   -d, --dir RUTA         Directorio base (defecto ~/.local/share/bonsai)
       --host HOST        Dirección de escucha (defecto 127.0.0.1; usa 0.0.0.0 para exponer)
       --backend B        auto (defecto) | cuda | rocm | vulkan | cpu
@@ -154,10 +157,11 @@ ENTORNO
   MODEL_REPO      Repo del GGUF (defecto prism-ml/Ternary-Bonsai-2-27B-gguf)
   BASE_DIR, PORT, HOST, MAX_MODEL_LEN, GPU_LAYERS, PARALLEL, PACKING,
   BACKEND, CUDA_BUILD, API_KEY, HF_TOKEN, EXTRA_ARGS, MIN_FREE_GB,
-  VISION=1, KV4=1, ALLOW_CPU=1
+  VISION=1, KV4=1, ALLOW_CPU=1, MODEL=bonsai|glm47
 
 EJEMPLOS
   bash serve-bonsai.sh -y
+  bash serve-bonsai.sh -y --model glm47
   bash serve-bonsai.sh -p 9000 -l 32768
   bash serve-bonsai.sh --vision --kv4
   API_KEY=sk-local bash serve-bonsai.sh -y
@@ -171,7 +175,8 @@ while [[ $# -gt 0 ]]; do
     -y|--yes) ASSUME_YES=1; shift ;;
     -p|--port) PORT="${2:?falta el puerto}"; shift 2 ;;
     -l|--max-model-len) MAX_MODEL_LEN="${2:?falta el valor}"; shift 2 ;;
-    -q|--packing) PACKING="${2:?falta el packing}"; shift 2 ;;
+    --model) MODEL="${2:?falta el modelo}"; shift 2 ;;
+    -q|--packing) PACKING="${2:?falta el packing}"; PACKING_EXPLICIT=1; shift 2 ;;
     -d|--dir) BASE_DIR="${2:?falta la ruta}"; shift 2 ;;
     --host) HOST="${2:?falta el host}"; shift 2 ;;
     --backend) BACKEND="${2:?falta el backend}"; if [[ "$BACKEND" == "cpu" ]]; then ALLOW_CPU=1; fi; shift 2 ;;
@@ -192,31 +197,70 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- Perfil del modelo -----------------------------------------------------
+# --- Packing de Bonsai -----------------------------------------------------
 case "$PACKING" in
   pq2|PQ2_0)
     PACKING=pq2
-    MODEL_FILE="Ternary-Bonsai-2-27B-PQ2_0.gguf"
-    EXPECTED_SIZE=7206168928
-    MODEL_TYPE=142            # GGML_TYPE_PQ2_0 (fork de PrismML)
+    BONSAI_FILE="Ternary-Bonsai-2-27B-PQ2_0.gguf"
+    BONSAI_SIZE=7206168928
+    BONSAI_TYPE=142           # GGML_TYPE_PQ2_0 (fork de PrismML)
     ;;
   ptq1|PTQ1_0)
     PACKING=ptq1
-    MODEL_FILE="Ternary-Bonsai-2-27B-PTQ1_0.gguf"
-    EXPECTED_SIZE=5946648928
-    MODEL_TYPE=143            # GGML_TYPE_PTQ1_0 (fork de PrismML)
+    BONSAI_FILE="Ternary-Bonsai-2-27B-PTQ1_0.gguf"
+    BONSAI_SIZE=5946648928
+    BONSAI_TYPE=143           # GGML_TYPE_PTQ1_0 (fork de PrismML)
     ;;
   q2|Q2_0)
     PACKING=q2
-    MODEL_FILE="Ternary-Bonsai-2-27B-Q2_0.gguf"
-    EXPECTED_SIZE=7626008928
-    MODEL_TYPE=42             # GGML_TYPE_Q2_0 (grupo 64; también en stock)
+    BONSAI_FILE="Ternary-Bonsai-2-27B-Q2_0.gguf"
+    BONSAI_SIZE=7626008928
+    BONSAI_TYPE=42            # GGML_TYPE_Q2_0 (grupo 64; también en stock)
     ;;
   *) die "packing desconocido: $PACKING (usa pq2, ptq1 o q2)" ;;
 esac
 
+# --- Perfil del modelo -----------------------------------------------------
+case "$MODEL" in
+  bonsai|bonsai2|bonsai-2) MODEL=bonsai ;;
+  glm|glm47|glm-4.7|glm4.7) MODEL=glm ;;
+  *) die "modelo desconocido: $MODEL (usa bonsai o glm47)" ;;
+esac
+
+if [[ "$MODEL" == "glm" && "$PACKING_EXPLICIT" == "1" ]]; then
+  die "--packing solo aplica a --model bonsai; GLM usa su propio GGUF"
+fi
+
+if [[ "$MODEL" == "bonsai" ]]; then
+  MODEL_LABEL="Ternary Bonsai 2 27B"
+  MODEL_QUANT_LABEL="$PACKING"
+  MODEL_REPO="${MODEL_REPO:-prism-ml/Ternary-Bonsai-2-27B-gguf}"
+  MODEL_FILE="$BONSAI_FILE"
+  EXPECTED_SIZE="$BONSAI_SIZE"
+  MODEL_TYPE="$BONSAI_TYPE"
+  SERVED_NAME="${SERVED_NAME:-bonsai-2-27b}"
+  MMPROJ_SUPPORTED=1
+  MODEL_VALIDATOR="bonsai"
+  SAMPLING=(--temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.05)
+else
+  MODEL_LABEL="GLM-4.7-Flash 30B-A3B"
+  MODEL_QUANT_LABEL="UD-Q4_K_XL"
+  MODEL_REPO="${MODEL_REPO:-unsloth/GLM-4.7-Flash-GGUF}"
+  MODEL_FILE="GLM-4.7-Flash-UD-Q4_K_XL.gguf"
+  EXPECTED_SIZE=17520169312
+  MODEL_TYPE=""
+  SERVED_NAME="${SERVED_NAME:-glm-4.7-flash}"
+  MMPROJ_SUPPORTED=0
+  MODEL_VALIDATOR="generic"
+  SAMPLING=(--temp 1.0 --top-p 0.95 --min-p 0.01)
+fi
+
 MMPROJ_FILE="Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf"
 MMPROJ_SIZE=629246976
+
+if (( VISION == 1 )) && (( MMPROJ_SUPPORTED == 0 )); then
+  die "--vision no está disponible para $MODEL_LABEL (solo Bonsai trae mmproj)"
+fi
 
 [[ "$VISION" == 1 || "$VISION" == 0 ]] || die "VISION debe ser 0 o 1"
 [[ "$KV4" == 1 || "$KV4" == 0 ]] || die "KV4 debe ser 0 o 1"
@@ -432,12 +476,30 @@ fi
 if (( RAM_MB > 0 )); then info "RAM: $(( RAM_MB / 1024 )) GiB"; fi
 
 if [[ "$BACKEND" == "cpu" ]]; then
-  warn "sin GPU utilizable: se usará la CPU (mucho más lento con un 27B)"
+  warn "sin GPU utilizable: se usará la CPU (mucho más lento)"
+fi
+
+# GLM-4.7-Flash pesa 17,5 GB: no cabe en 12 GB y necesita margen para el KV.
+if [[ "$MODEL" == "glm" ]]; then
+  if [[ "$BACKEND" == "cpu" ]]; then
+    if (( RAM_MB > 0 && RAM_MB < 32768 )); then
+      die "GLM-4.7-Flash necesita ~18 GB de pesos: usa ≥32 GB de RAM, o --model bonsai"
+    fi
+  elif (( VRAM_MB > 0 && VRAM_MB < 22000 )); then
+    die "GLM-4.7-Flash UD-Q4_K_XL pesa 17,5 GB y tu GPU tiene ${VRAM_MB} MiB. Usa --model bonsai o una GPU de ≥22 GB (3090/4090)."
+  fi
 fi
 
 # Contexto automático. En GPU manda la VRAM; en CPU, la RAM.
 if [[ "$MAX_MODEL_LEN" == "auto" ]]; then
-  if [[ "$BACKEND" == "cpu" ]]; then
+  if [[ "$MODEL" == "glm" ]]; then
+    if [[ "$BACKEND" == "cpu" ]]; then
+      if (( RAM_MB >= 65536 )); then MAX_MODEL_LEN=16384; else MAX_MODEL_LEN=8192; fi
+    elif (( VRAM_MB >= 48000 )); then MAX_MODEL_LEN=131072
+    elif (( VRAM_MB >= 32000 )); then MAX_MODEL_LEN=65536
+    else                              MAX_MODEL_LEN=32768
+    fi
+  elif [[ "$BACKEND" == "cpu" ]]; then
     if   (( RAM_MB >= 49152 )); then MAX_MODEL_LEN=32768
     elif (( RAM_MB >= 24576 )); then MAX_MODEL_LEN=16384
     else                             MAX_MODEL_LEN=8192
@@ -487,15 +549,25 @@ else
 fi
 RELEASE_URL="https://github.com/${LLAMA_REPO}/releases/download/${LLAMA_RELEASE}/${ASSET}"
 
-if [[ "$PACKING" != "q2" && "$LLAMA_RELEASE" != prism-* ]]; then
+if [[ "$MODEL" == "bonsai" && "$PACKING" != "q2" && "$LLAMA_RELEASE" != prism-* ]]; then
   warn "los packings pq2/ptq1 solo los lee el fork de PrismML;"
   info "  el release '$LLAMA_RELEASE' puede no cargarlos. Usa --packing q2 si es un llama.cpp oficial."
 fi
 
 # --- Espacio en disco ------------------------------------------------------
 if [[ "$MIN_FREE_GB" == "0" ]]; then
-  if [[ "$PACKING" == "ptq1" ]]; then MIN_FREE_GB=10; else MIN_FREE_GB=12; fi
+  if [[ "$MODEL" == "glm" ]]; then
+    MIN_FREE_GB=22
+  elif [[ "$PACKING" == "ptq1" ]]; then
+    MIN_FREE_GB=10
+  else
+    MIN_FREE_GB=12
+  fi
   if (( VISION == 1 )); then MIN_FREE_GB=$(( MIN_FREE_GB + 1 )); fi
+  # Si el modelo ya está descargado y completo, solo hace falta espacio para los binarios.
+  if [[ -f "$GGUF_PATH" ]] && (( $(stat -Lc %s "$GGUF_PATH" 2>/dev/null || echo 0) == EXPECTED_SIZE )); then
+    MIN_FREE_GB=2
+  fi
 fi
 [[ "$MIN_FREE_GB" =~ ^[0-9]+$ ]] || die "MIN_FREE_GB inválido"
 mkdir -p "$BASE_DIR"
@@ -504,7 +576,7 @@ FREE_GB="$(df -Pk "$BASE_DIR" | awk 'NR==2{printf "%d", $4/1024/1024}')"
 (( FREE_GB >= MIN_FREE_GB )) || die "necesito ${MIN_FREE_GB} GiB libres en $BASE_DIR y hay ${FREE_GB} GiB."
 ok "espacio libre: ${FREE_GB} GiB"
 
-info "configuración: pack=$PACKING  contexto=$MAX_MODEL_LEN  slots=$PARALLEL  puerto=$PORT  host=$HOST"
+info "configuración: modelo=$MODEL_LABEL ($MODEL_QUANT_LABEL)  contexto=$MAX_MODEL_LEN  slots=$PARALLEL  puerto=$PORT  host=$HOST"
 info "binarios: $BIN_DIR"
 info "modelo:   $GGUF_PATH"
 if (( VISION == 1 )); then info "visión:   $MMPROJ_PATH"; fi
@@ -521,7 +593,7 @@ SERVE_ARGS=(
   -np "$PARALLEL"
   --jinja
   --metrics
-  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.05
+  "${SAMPLING[@]}"
 )
 if (( VISION == 1 )); then SERVE_ARGS+=(-mm "$MMPROJ_PATH"); fi
 if (( KV4 == 1 )); then SERVE_ARGS+=(-ctk q4_0 -ctv q4_0); fi
@@ -669,8 +741,9 @@ step "4/6 · Verificando el GGUF"
 [[ "$(head -c 4 "$GGUF_PATH")" == "GGUF" ]] || die "$GGUF_PATH no es un fichero GGUF válido (¿descarga incompleta?)"
 ok "cabecera GGUF correcta"
 
-if have python3; then
-  python3 - "$GGUF_PATH" "$MODEL_TYPE" "$PACKING" <<'PY' || die "la verificación del GGUF falló"
+if [[ "$MODEL_VALIDATOR" == "bonsai" ]]; then
+  if have python3; then
+    python3 - "$GGUF_PATH" "$MODEL_TYPE" "$PACKING" <<'PY' || die "la verificación del GGUF falló"
 import collections
 import io
 import struct
@@ -756,9 +829,75 @@ if types[want_type] == 0:
              "¿packing equivocado? Usa --packing pq2/ptq1/q2 según el fichero."
              % (want_type, packing))
 PY
-  ok "packing $PACKING confirmado en el GGUF"
+    ok "packing $PACKING confirmado en el GGUF"
+  else
+    warn "python3 no está instalado; omito la verificación de arquitectura y packing"
+  fi
 else
-  warn "python3 no está instalado; omito la verificación de arquitectura y packing"
+  if have python3; then
+    python3 - "$GGUF_PATH" <<'PY' || warn "no pude leer la cabecera del GGUF"
+import io
+import struct
+import sys
+
+with open(sys.argv[1], "rb") as fh:
+    data = fh.read(1024 * 1024)
+f = io.BytesIO(data)
+
+def u32():
+    return struct.unpack("<I", f.read(4))[0]
+
+def u64():
+    return struct.unpack("<Q", f.read(8))[0]
+
+def string():
+    n = u64()
+    return f.read(n).decode("utf-8", "replace")
+
+SCALAR = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f",
+          7: "?", 10: "Q", 11: "q", 12: "d"}
+
+def skip(t):
+    if t in SCALAR:
+        f.seek(struct.calcsize("<" + SCALAR[t]), 1)
+    elif t == 8:
+        f.seek(u64(), 1)
+    elif t == 9:
+        et, n = u32(), u64()
+        for _ in range(n):
+            skip(et)
+    else:
+        raise ValueError(t)
+
+magic = f.read(4)
+if magic != b"GGUF":
+    sys.exit("magic distinto de GGUF")
+version = u32()
+n_tensors, n_kv = u64(), u64()
+meta = {}
+for _ in range(n_kv):
+    key = string()
+    t = u32()
+    if key in ("general.architecture", "general.name"):
+        if t == 8:
+            meta[key] = string()
+        elif t in SCALAR:
+            meta[key] = struct.unpack("<" + SCALAR[t],
+                                      f.read(struct.calcsize("<" + SCALAR[t])))[0]
+        else:
+            skip(t)
+    else:
+        skip(t)
+    if "general.architecture" in meta and "general.name" in meta:
+        break
+print("    GGUF v%d · %d tensores · arquitectura=%s · nombre=%s"
+      % (version, n_tensors, meta.get("general.architecture", "?"),
+         meta.get("general.name", "?")))
+PY
+  else
+    warn "python3 no está instalado; omito la comprobación de arquitectura"
+  fi
+  ok "GGUF válido ($MODEL_QUANT_LABEL)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # bonsai-server
 
-Servir **Ternary Bonsai 2 27B** (PrismML, GGUF) como API compatible con OpenAI usando `llama-server`, en una orden.
+Servir **Bonsai 2 27B** o **GLM-4.7-Flash 30B-A3B** (GGUF) como API compatible con OpenAI usando `llama-server`, en una orden.
 
 Este repo usa **llama.cpp** (`llama-server`), no vLLM: vLLM no puede servir Bonsai 2 hoy (ver [Por qué no vLLM](#por-qué-no-vllm)).
 
@@ -42,7 +42,7 @@ curl -fsSLO https://raw.githubusercontent.com/fmanso/bonsai-server/main/test-api
 bash serve-bonsai.sh -y
 ```
 
-La primera ejecución instala lo que falte (`curl`, `tar`, `python3`), descarga el binario de llama.cpp (unos 200 MB con CUDA) y el modelo (7,21 GB), lo verifica y arranca la API. Tarda unos minutos según la conexión; las siguientes arrancan en segundos.
+La primera ejecución instala lo que falte (`curl`, `tar`, `python3`), descarga el binario de llama.cpp (unos 200 MB con CUDA) y el modelo (7,21 GB con Bonsai; 17,5 GB con GLM), lo verifica y arranca la API. Tarda unos minutos según la conexión; las siguientes arrancan en segundos.
 
 ### 2. Comprueba
 
@@ -65,6 +65,8 @@ En la 5070, si quieres más contexto para que el razonamiento tenga sitio, usa e
 bash serve-bonsai.sh -y --packing ptq1 -l 32768
 ```
 
+Si estás en la 3090 y quieres probar GLM-4.7-Flash, arranca con `--model glm47` (ver [Dos modelos](#dos-modelos-bonsai-o-glm)).
+
 ### 4. Acceso desde otra máquina de la red
 
 Por defecto escucha solo en `127.0.0.1`. Para exponerlo:
@@ -81,7 +83,7 @@ BASE_URL=http://IP-DEL-SERVIDOR:8000 API_KEY=sk-local bash test-api.sh
 
 Abre el puerto en el firewall si hace falta. El health check (`/health`) es público; el resto exige la clave.
 
-### Antes de descargar 7 GB: `--dry-run`
+### Antes de descargar el modelo: `--dry-run`
 
 ```bash
 bash serve-bonsai.sh --dry-run
@@ -89,13 +91,33 @@ bash serve-bonsai.sh --dry-run
 
 Enseña el backend, la VRAM, el contexto y la orden final que ejecutaría, sin tocar nada.
 
+## Dos modelos: Bonsai o GLM
+
+| `--model` | Modelo | GGUF | VRAM | Contexto auto en 3090 |
+|---|---|---|---:|---:|
+| `bonsai` (defecto) | Ternary Bonsai 2 27B | 5,95–7,63 GB | 8 GB+ | 65536 |
+| `glm47` | GLM-4.7-Flash 30B-A3B | 17,5 GB (`UD-Q4_K_XL`) | **≥ 22 GB** | 32768 |
+
+```bash
+# Bonsai (defecto)
+bash serve-bonsai.sh -y
+
+# GLM-4.7-Flash (solo 3090/4090; no cabe en la 5070)
+bash serve-bonsai.sh -y --model glm47
+```
+
+- **Bonsai** es la mejor relación calidad/tamaño: visión, 262k de contexto, cabe en la 5070 y va muy rápido. Es la opción por defecto.
+- **GLM-4.7-Flash** es un MoE de 30B con ~3,6B activos: muy rápido en bucles de agente y con 200k de contexto, pero **solo texto**, más flojo en matemáticas/conocimiento y **no cabe en 12 GB**. El script se niega a arrancarlo en la 5070 con un mensaje claro.
+- En la 3090, GLM arranca con 32768 de contexto; `-l 65536` puede caber y `--kv4` ayuda. GLM usa otro sampling (`min_p 0.01`, sin `top_k`); el script lo ajusta solo.
+- `--packing` solo aplica a Bonsai. `--vision` solo aplica a Bonsai.
+
 ---
 
 ## Qué hace
 
 ```
 instala dependencias que falten → detecta GPU/CPU → descarga el binario de
-llama.cpp (CUDA/ROCm/Vulkan/CPU) → descarga el GGUF (PQ2_0, 7,21 GB)
+llama.cpp (CUDA/ROCm/Vulkan/CPU) → descarga el GGUF del modelo elegido
 → verifica el fichero → llama-server
 ```
 
@@ -123,7 +145,7 @@ Por eso este repo sirve el modelo por el camino soportado. Si necesitas PagedAtt
 |---|---|---|
 | Sistema | Linux x86_64 (glibc ≥ 2.34: Ubuntu 22.04+, Debian 12+) | Ubuntu 24.04 / Arch actualizado |
 | Acelerador | GPU Vulkan o CPU (lento) | NVIDIA (CUDA) o AMD (ROCm) |
-| VRAM | 8 GB con `--packing ptq1` y `-l 8192` | 12 GB (16k) · 16 GB (32k) · 24 GB (64k) |
+| VRAM | 8 GB con `--packing ptq1` y `-l 8192` | 12 GB (Bonsai 16k) · 24 GB (Bonsai 64k / GLM 32k) |
 | RAM | 16 GB en CPU | 32 GB+ en CPU |
 | Disco | 10 GB (`ptq1`) | 15 GB |
 | Software | se instala solo: `curl`/`wget`, `tar`, `python3` | `hf` (descarga paralela, opcional) |
@@ -140,6 +162,9 @@ bash serve-bonsai.sh
 
 # sin preguntas, otro puerto y 32k de contexto
 bash serve-bonsai.sh --yes --port 9000 --max-model-len 32768
+
+# GLM-4.7-Flash en la 3090
+bash serve-bonsai.sh -y --model glm47
 
 # con clave de API y expuesto en la red
 API_KEY=sk-local bash serve-bonsai.sh --host 0.0.0.0 -y
@@ -167,7 +192,8 @@ bash serve-bonsai.sh --dry-run
 | `-y, --yes` | no | No pedir confirmación |
 | `-p, --port N` | `8000` | Puerto HTTP |
 | `-l, --max-model-len N` | `auto` | Contexto máximo. `auto` se calcula con VRAM/RAM |
-| `-q, --packing P` | `pq2` | `pq2` (7,21 GB) · `ptq1` (5,95 GB) · `q2` (7,63 GB) |
+| `--model M` | `bonsai` | `bonsai` o `glm47` (GLM-4.7-Flash 30B-A3B; ≥22 GB VRAM) |
+| `-q, --packing P` | `pq2` | Solo Bonsai: `pq2` (7,21 GB) · `ptq1` (5,95 GB) · `q2` (7,63 GB) |
 | `-d, --dir RUTA` | `~/.local/share/bonsai` | Binarios y modelos |
 | `--host HOST` | `127.0.0.1` | Interfaz de escucha. `0.0.0.0` para exponer |
 | `--backend B` | `auto` | `cuda` · `rocm` · `vulkan` · `cpu` |
@@ -233,10 +259,13 @@ Con `--kv4` puedes subir el contexto en GPUs justas de VRAM. Si arranca con OOM,
 ## Probar la API
 
 ```bash
-# prueba rápida (sin razonamiento, ~1k tokens de salida)
+# prueba rápida de Bonsai (sin razonamiento, ~1k tokens de salida)
 bash test-api.sh
 
-# viendo el razonamiento del modelo
+# si el servidor está sirviendo GLM
+MODEL=glm-4.7-flash bash test-api.sh
+
+# viendo el razonamiento del modelo (Bonsai)
 MAX_TOKENS=16384 REASONING_EFFORT=medium bash test-api.sh
 
 # o a mano:
@@ -327,6 +356,7 @@ Sin systemd, para una prueba en segundo plano: `tmux` o `nohup bash serve-bonsai
 | Síntoma | Causa | Solución |
 |---|---|---|
 | `CUDA out of memory` al arrancar | Contexto o KV demasiado grandes | `-l 16384` (o `8192`) y/o `--packing ptq1`, `--kv4` |
+| GLM se niega a arrancar en la 5070 | GLM pesa 17,5 GB y la GPU tiene 12 GB | Usa `--model bonsai` en la 5070; GLM necesita ≥22 GB |
 | `unknown type 142` / `143` al cargar | Estás usando un llama.cpp oficial con `pq2`/`ptq1` | Usa el script (fork de PrismML) o `--packing q2` |
 | `no suitable device` / no ve la GPU | Driver o backend mal detectado | `bash serve-bonsai.sh --dry-run` y luego `--backend vulkan` o `--cpu` |
 | Error de CUDA al arrancar | Driver más antiguo que el binario | Actualiza el driver o `--backend vulkan` |
@@ -344,7 +374,7 @@ Los binarios que fallan al arrancar se pueden sustituir por una compilación pro
 
 ## Verificación honesta
 
-El script se ha validado sin GPU: detección de hardware, descarga y extracción de binarios, `--dry-run`, sintaxis, y la verificación de los tres GGUF (`Q2_0`, `PQ2_0`, `PTQ1_0`) leyendo su cabecera real desde Hugging Face (arquitectura `qwen35`, Hadamard 1024 y el tipo de tensor correcto en cada packing).
+El script se ha validado sin GPU: detección de hardware, descarga y extracción de binarios, `--dry-run`, sintaxis, y la verificación de los GGUF leyendo su cabecera real desde Hugging Face: los tres de Bonsai (`Q2_0`, `PQ2_0`, `PTQ1_0`: arquitectura `qwen35`, Hadamard 1024 y el tipo de tensor correcto) y el de GLM-4.7-Flash (`deepseek2`, 17,5 GB, con su tamaño exacto).
 
 Lo que **no** se ha podido probar aquí es el arranque con GPU: esta máquina no tiene driver NVIDIA operativo. La primera ejecución en tu tarjeta es la prueba real; si algo falla, el mensaje dirá si es el driver, el backend o el contexto.
 
