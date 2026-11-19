@@ -2,7 +2,7 @@
 
 Servir **Ternary Bonsai 2 27B** (PrismML, GGUF) como API compatible con OpenAI usando `llama-server`, en una orden.
 
-El repo conserva el nombre `bonsai-vllm-server` por historial, pero **ya no usa vLLM**: vLLM no puede servir Bonsai 2 hoy (ver [Por qué no vLLM](#por-qué-no-vllm)).
+Este repo usa **llama.cpp** (`llama-server`), no vLLM: vLLM no puede servir Bonsai 2 hoy (ver [Por qué no vLLM](#por-qué-no-vllm)).
 
 ---
 
@@ -29,16 +29,16 @@ El script también lo detecta, te ofrece instalarlo (Ubuntu/Arch) o te da la ord
 ### 1. Clona y arranca
 
 ```bash
-git clone https://github.com/fmanso/bonsai-vllm-server.git
-cd bonsai-vllm-server
+git clone https://github.com/fmanso/bonsai-server.git
+cd bonsai-server
 bash serve-bonsai.sh -y
 ```
 
 Si no tienes `git` en la máquina, descarga los dos scripts y ejecuta:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/fmanso/bonsai-vllm-server/main/serve-bonsai.sh
-curl -fsSLO https://raw.githubusercontent.com/fmanso/bonsai-vllm-server/main/test-api.sh
+curl -fsSLO https://raw.githubusercontent.com/fmanso/bonsai-server/main/serve-bonsai.sh
+curl -fsSLO https://raw.githubusercontent.com/fmanso/bonsai-server/main/test-api.sh
 bash serve-bonsai.sh -y
 ```
 
@@ -291,7 +291,7 @@ After=network-online.target
 
 [Service]
 User=TU_USUARIO
-ExecStart=/usr/bin/bash /RUTA/A/bonsai-vllm-server/serve-bonsai.sh -y --host 0.0.0.0 --api-key sk-local
+ExecStart=/usr/bin/bash /RUTA/A/bonsai-server/serve-bonsai.sh -y --host 0.0.0.0 --api-key sk-local
 Restart=on-failure
 RestartSec=5
 
